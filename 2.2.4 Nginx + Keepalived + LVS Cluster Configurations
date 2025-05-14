@@ -1,0 +1,197 @@
+Step 1 Use Nginx to configure a layer-7 proxy for Apache.
+On the Ansible host, create a layer-7 proxy configuration file required by Nginx and use
+the planned addresses to access WordPress and images as follows:
+upstream wp {
+ server blog.test.com;
+}
+upstream image {
+ server 10.0.0.41:82;
+ server 10.0.0.42:82;
+}
+server {
+ listen 80;
+ server_name 10.0.0.12;
+ location /blog/ {
+ proxy_pass http://wp/;
+ proxy_set_header Host $host;
+ proxy_set_header X-Real-IP $remote_addr;
+ proxy_set_header X-Forwarded-For $remote_addr;
+ proxy_set_header X-Forwarded-Proto $scheme;
+ proxy_set_header X-Forwarded-Host $host;
+ proxy_set_header X-Forwarded-Port $server_port;
+ }
+ location /image/ {
+ proxy_pass http://image/;
+ }
+}
+Note: WordPress writes the access address to the database. For example, 10.0.0.41:81 is
+used during WordPress installation.
+
+Use playbook to upload the file to the Nginx host and reload the Nginx service as
+follows:
+---
+- hosts: Nginx
+ remote_user: root
+ tasks:
+ - name: upload configure
+ template:
+ src: /root/yaml/file/proxy.conf
+ dest: /etc/nginx/conf.d/proxy.conf
+ - name: reload nginx
+ service:
+ name: nginx
+ state: reloaded
+Log in to the Nginx host and to set the gateway to the DIP of the active LVS:
+nmcli con mod "System enp4s4" +ipv4.gateway 10.0.0.11
+Run the following command for the configuration to take effect:
+nmcli con down "System enp4s4" && nmcli con up "System enp4s4"
+Step 2 Use LVS and Keepalived to configure a layer-4 Proxy for Nginx.
+Compile the Keepalived configuration file as follows:
+! Configuration File for keepalived
+global_defs {
+ router_id {{ ansible_fqdn }}
+}
+vrrp_instance LVS {
+ state {{ role }}
+ interface ens3
+ virtual_router_id 53
+ priority {{ priority }}
+ advert_int 1
+ authentication {
+ auth_type PASS
+ auth_pass 1111
+ }
+ virtual_ipaddress {
+ 192.168.1.10/24
+ }
+}
+virtual_server 192.168.1.10 80 {
+ delay_loop 6
+ lb_algo rr
+ lb_kind NAT
+ persistence_timeout 50
+protocol TCP
+ real_server 10.0.0.13 80 {
+ weight 1
+ TCP_CHECK {
+ connect_timeout 3
+ retry 3
+ delay_before_retry 3
+ }
+ }
+ real_server 10.0.0.14 80 {
+ weight 2
+ TCP_CHECK {
+ connect_timeout 3
+ retry 3
+ delay_before_retry 3
+ }
+ }
+}
+
+
+Compile playbook, upload the Keepalived configuration file to the corresponding host,
+and restart the Keepalived service as follows:
+---
+- hosts: 192.168.1.11
+ remote_user: root
+ vars:
+ - role: MASTER
+ - priority: 255
+ tasks:
+ - name: upload configuration to Nginx
+ template: src=/root/yaml/file/lvs-keep.conf.j2 dest=/etc/keepalived/keepalived.conf
+ - name: restart keepalived
+ service:
+ name: keepalived
+ state: restarted
+ enabled: yes
+- hosts: 192.168.1.12
+ remote_user: root
+ vars:
+ - role: BACKUP
+ - priority: 200
+ tasks:
+ - name: upload configuration to Nginx
+ template: src=/root/yaml/file/lvs-keep.conf.j2 dest=/etc/keepalived/keepalived.conf
+ - name: restart keepalived
+ service:
+ name: keepalived
+ state: restarted
+ enabled: yes
+
+
+
+
+2.2.5 DNS Configurations
+Step 1 Configure the DNS service.
+In this practice, there is only one DNS server. Therefore, you can directly log in to the
+DNS server for configurations. According to the planning, you need to resolve
+www.test.com to 192.168.1.10, add a record A (blog.test.com), and resolve it to
+10.0.0.41 and 10.0.0.42. For details about the DNS configuration file, see the following:
+$TTL 1D
+@ IN SOA master.test.com. admin.test.com. (
+ 0 ; serial
+ 1D ; refresh
+ 1H ; retry
+1W ; expire
+3H ) ; minimum
+ NS master
+master A 192.168.1.10
+www CNAME main
+main A 192.168.1.10
+blog A 10.0.0.41
+blog A 10.0.0.42
+Supplement other configurations by referring to chapter 1 so that hosts in the
+192.168.1.x/24 network segment can resolve www.test.com and Nginx hosts can resolve
+blog.test.com.
+When WordPress is installed, it writes the address of the host where it is located to the
+database. You need to change the address in the database to blog.test.com on the
+MySQL host.
+use WP;
+update wp_options set option_value="http://blog.test.com:81" where option_name="home";
+update wp_options set option_value="http://blog.test.com:81" where option_name="siteurl";
+
+
+
+
+2.2.6 Zabbix Configurations
+Step 1 Install zabbix-server.
+In this practice, zabbix-server is deployed in a single-node system. You need to install
+zabbix-server on the zabbix host based on the learned knowledge.
+Step 2 Install zabbix-agent.
+Compile ansible-playbook to install zabbix-agent2 on the involved hosts as follows:
+---
+- hosts: all
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install zabbix-release
+command: rpm -Uvh https://repo.zabbix.com/zabbix/6.2/rhel/8/x86_64/zabbix-release-6.2-
+3.el8.noarch.rpm
+ - name: install zabbix-agent2
+ yum:
+ name: zabbix-agent2
+ state: present
+ - name: assign IP of zabbix_server
+ replace:
+ path: /etc/zabbix/zabbix_agent2.conf
+ regexp: Server=127.0.0.1
+ replace: Server=10.0.0.31
+ - name: enable zabbix-agent2
+ service:
+ name: zabbix-agent2
+ state: started
+ enabled: yes
+
+
+
+
+
+
+
+
+
+
+
+
