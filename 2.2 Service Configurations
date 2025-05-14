@@ -1,0 +1,431 @@
+2.2.1 MySQL Active/Standby Cluster Configurations
+Step 1 Initialize the database.
+Use playbook to initialize the database and set the password of the root user to
+Huawei@123. The following information is for reference:
+---
+- hosts: Mysql
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: set password for root
+ command: mysql -e "alter user root@'localhost' identified by 'Huawei@123';"
+Step 2 Modify the configuration file of the active database.
+Set 10.0.0.31 as the master node of the MySQL cluster using playbook. The following
+information is for reference:
+---
+- hosts: 10.0.0.31
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: create user for replication
+ command: mysql -uroot -p"Huawei@123" -e "create user slave identified with
+mysql_native_password by 'Huawei@123';"
+ - name: grant replication for slave
+ command: mysql -uroot -p"Huawei@123" -e "GRANT REPLICATION SLAVE ON *.* to
+'slave'@'%';"
+ - name: enable privileges
+ tags: master
+ command: mysql -uroot -p"Huawei@123" -e "FLUSH PRIVILEGES;"
+ - name: config master
+ lineinfile:
+ path: /etc/my.cnf
+ line: "{{ item }}"
+state: present
+ with_items:
+ - 'server-id=1'
+ - 'log-bin=/var/lib/mysql/binlog'
+ notify: restart mysqld
+ handlers:
+ - name: restart mysqld
+ service:
+ name: mysqld
+ state: restarted
+Run the following command to view the current binary log name and offset of the
+primary service:
+ansible 10.0.0.31 -a 'mysql -uroot -p"Huawei@123" -e "show master status;"'
+See the following figure.
+
+Step 3 Modify the configuration file of the standby database.
+Set 10.0.0.32 as the slave node of the MySQL cluster using playbook. The following
+information is for reference:
+---
+- hosts: 10.0.0.32
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: config slave
+ lineinfile:
+ path: /etc/my.cnf
+ line: "{{ item }}"
+ state: present
+ with_items:
+ - 'server-id=2'
+ - 'log-bin=/var/lib/mysql/binlog'
+ notify: restart slave
+ - name: choose master
+ tags: master
+ command: mysql -uroot -p"Huawei@123" -e "CHANGE MASTER TO
+MASTER_HOST='10.0.0.31',MASTER_PORT=3306,MASTER_USER='slave',MASTER_PASSWORD='Huawei
+@123',MASTER_LOG_FILE='binlog.000002',MASTER_LOG_POS=157;"
+ - name: start slave
+ tags: start
+ command: mysql -uroot -p"Huawei@123" -e "start slave;"
+ handlers:
+ - name: restart slave
+ service:
+ name: mysqld
+ state: restarted
+
+Run the following command to check the slave status:
+ansible 10.0.0.32 -a 'mysql -uroot -p"Huawei@123" -e "show slave status\G;"'
+
+f the status is Yes, the MySQL active/standby cluster is successfully created. Otherwise,
+the creation fails. For details about the failure cause, see Last_IO_Error in the command
+output.
+Step 4 Create the database and user required by WordPress.
+Run the following command to create the database required by WordPress and set the
+name of the created database to WP as planned:
+ansible 10.0.0.31 -a 'mysql -uroot -p"Huawei@123" -e "create database WP character set =
+utf8mb4;"'
+After the creation is complete, check whether the WP is synchronized on the standby
+node.
+ansible 10.0.0.32 -a 'mysql -uroot -p"Huawei@123" -e "show databases"'
+If the synchronization is successful, the database is successfully configured.
+Finally, log in to 10.0.0.31 and run the following commands to create the user required
+by WordPress:
+mysql> CREATE USER wp@'%' identified by 'Huawei@123';
+mysql> GRANT ALL PRIVILEGES ON WP.* TO 'wp'@'%';
+mysql> FLUSH PRIVILEGES;
+
+
+
+2.2.2 GlusterFS Cluster Setup
+Step 1 Create partitions required by the GlusterFS cluster.
+Create two partitions vdb1 and vdb2, both with 5 GB capacity, on the GlusterFS node.
+Format the partitions as xfs and mount them to /mnt/point1 and /mnt/point2
+respectively. point1 and point2 are storage blocks. For details about the playbook
+content, see the following:
+---
+- hosts: Gluster
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: create mount brick1
+ file:
+ path: /mnt/point1
+ state: directory
+ - name: create mount brick2
+ file:
+ path: /mnt/point2
+ state: directory
+ - name: install parted
+ yum:
+ name: parted
+ state: present
+ - name: create part1
+ parted:
+ device: /dev/vdb
+ number: 1
+ part_end: 5GiB
+ state: present
+ - name: create part2
+ parted:
+ device: /dev/vdb
+ number: 2
+ part_start: 5GiB
+ part_end: 10GiB
+ state: present
+ - name: install xfsprogs
+ yum:
+ name: xfsprogs
+ state: present
+ - name: format vdb1
+ filesystem:
+ dev: /dev/vdb1
+ fstype: xfs
+ force: yes
+ - name: format vdb2
+ filesystem:
+dev: /dev/vdb2
+ fstype: xfs
+ force: yes
+ - name: mount vbd1
+ mount:
+ src: /dev/vdb1
+ path: /mnt/point1
+ fstype: xfs
+ state: mounted
+ - name: mount vbd2
+ mount:
+ src: /dev/vdb2
+ path: /mnt/point2
+ fstype: xfs
+ state: mounted
+ - name: config hosts
+ lineinfile:
+ path: /etc/hosts
+ line: "{{ item }}"
+ state: present
+ with_items:
+ - '10.0.0.21 Gluster-01'
+ - '10.0.0.22 Gluster-02'
+ - '10.0.0.23 Gluster-03'
+
+
+Step 2 Create a GlusterFS cluster.
+Use Keepalived to configure three GlusterFS nodes as an HA cluster. First, create the
+jinja2 template corresponding to the Keepalived configuration file. For details, see the
+following content:
+! Configuration File for keepalived
+global_defs {
+ router_id {{ ansible_fqdn }}
+}
+vrrp_instance Nginx {
+ state {{ role }}
+ interface ens3
+ virtual_router_id 52
+ priority {{ priority }}
+ advert_int 1
+ authentication {
+ auth_type PASS
+ auth_pass 1111
+ }
+ virtual_ipaddress {
+ 10.0.0.20/24
+ }
+}
+Use playbook to upload the template to each node and start the Keepalived service. Refer
+to the following to configure playbook:
+
+---
+- hosts: 10.0.0.21
+ remote_user: root
+ vars:
+ - role: MASTER
+ - priority: 255
+ tasks:
+ - name: upload configuration to glusterfs
+ template: src=/root/yaml/file/keepalived.conf.j2 dest=/etc/keepalived/keepalived.conf
+ - name: restart keepalived
+ service:
+ name: keepalived
+ state: started
+ enabled: yes
+- hosts: 10.0.0.22
+remote_user: root
+ vars:
+ - role: BACKUP
+ - priority: 200
+ tasks:
+ - name: upload configuration to glusterfs
+ template: src=/root/yaml/file/keepalived.conf.j2 dest=/etc/keepalived/keepalived.conf
+ - name: restart keepalived
+ service:
+ name: keepalived
+ state: started
+ enabled: yes
+- hosts: 10.0.0.23
+ remote_user: root
+ vars:
+ - role: BACKUP
+ - priority: 100
+ tasks:
+ - name: upload configuration to glusterfs
+ template: src=/root/yaml/file/keepalived.conf.j2 dest=/etc/keepalived/keepalived.conf
+ - name: restart keepalived
+ service:
+ name: keepalived
+ state: started
+ enabled: yes
+
+Step 3 Create logical volumes of GlusterFS.
+Run the following commands to create logical volumes of GlusterFS:
+ansible 10.0.0.21 -a "gluster peer probe Gluster-02"
+ansible 10.0.0.21 -a "gluster peer probe Gluster-03"
+ansible 10.0.0.21 -a "gluster volume create wp disperse 3 redundancy 1 Gluster-01:/mnt/point1
+Gluster-02:/mnt/point1 Gluster-03:/mnt/point1 force"
+ansible 10.0.0.21 -a "gluster volume start wp"
+ansible 10.0.0.21 -a "gluster volume create image disperse 3 redundancy 1 Gluster-01:/mnt/point2
+Gluster-02:/mnt/point2 Gluster-03:/mnt/point2 force"
+ansible 10.0.0.21 -a "gluster volume start image"
+
+
+
+2.2.3 Apache Service Configurations
+Step 1 Add PHP-related configurations.
+Compile playbook and add PHP-related configurations to the Apache configuration file.
+For details, see the following content:
+---
+- hosts: Apache
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: config php
+ lineinfile:
+ path: /etc/httpd/conf/httpd.conf
+ insertafter: AddType application/x-gzip .gz .tgz
+ line: " AddType application/x-httpd-php .php"
+Step 2 Mount logical volumes provided by GlusterFS.
+According to the plan, WordPress files are stored in the /data/wp/ directory on the
+Apache server, and static data is stored in the /data/image directory. Therefore, you
+need to compile playbook to create the corresponding directories and mount the logical
+volumes of GlusterFS to the corresponding directories as follows:
+---
+- hosts: Apache
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: create wp
+ file:
+ path: /data/wp
+ owner: apache
+ group: apache
+ recurse: yes
+ state: directory
+ - name: create image
+ file:
+ path: /data/image
+ owner: apache
+ group: apache
+ recurse: yes
+ state: directory
+ - name: install glusterfs client
+ yum:
+ name: glusterfs-client
+ state: present
+- name: config hosts
+ lineinfile:
+ path: /etc/hosts
+ line: "{{ item }}"
+ state: present
+ with_items:
+ - '10.0.0.21 Gluster-01'
+ - '10.0.0.22 Gluster-02'
+ - '10.0.0.23 Gluster-03'
+ - name: mount glusterfs to wp
+ mount:
+ name: /data/wp
+ src: 10.0.0.20:/wp
+ fstype: glusterfs
+ state: mounted
+ opts: defaults,_netdev
+ - name: mount glusterfs to image
+ mount:
+ name: /data/image
+ src: 10.0.0.20:/image
+ fstype: glusterfs
+ state: mounted
+ opts: defaults,_netdev
+
+Step 3 Create a virtual host.
+Create a configuration file for configuring the Apache virtual host in Ansible as follows:
+<VirtualHost *:81>
+ ServerName localhost
+ DocumentRoot "/data/wp/"
+ <Directory "/data/wp">
+ AllowOverride None
+ Require all granted
+ </Directory>
+</VirtualHost>
+<VirtualHost *:82>
+ DocumentRoot "/data/image"
+ <Directory "/data/image">
+ AllowOverride None
+ Require all granted
+ </Directory>
+ ServerName localhost
+</VirtualHost>
+
+Use playbook to send the configuration to the Apache host and enable the corresponding
+port as follows:
+---
+- hosts: Apache
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: upload configure
+copy:
+ src: /root/yaml/file/vhost.conf
+ dest: /etc/httpd/conf.d/vhost.conf
+ - name: set 81 and 82
+ lineinfile:
+ path: /etc/httpd/conf/httpd.conf
+ insertafter: Listen 80
+ line: "{{ item }}"
+ with_items:
+ - "Listen 81"
+ - "Listen 82"
+ - name: restart httpd
+ service:
+ name: httpd
+ state: restarted
+
+
+
+Step 4 Create a static page.
+Log in to an Apache host, for example, host 10.0.0.41, to perform the following
+operations.
+Create a static page for displaying images as follows:
+<!DOCTYPE html>
+<html>
+ <head>
+ <title>Image display page</title>
+ <style>
+ img {
+ max-width: 100%;
+ height: auto;
+ }
+ .separator {
+ border-top: 2px solid #000;
+ margin: 20px 0;
+ }
+ </style>
+ </head>
+ <body>
+ <h1>Image display page</h1>
+ <ul>
+ <li><img src="image1.png" alt="image1.png"></li>
+ <li class="separator"></li>
+ <li><img src="image2.png" alt="image2.png"></li>
+ <li class="separator"></li>
+ <li><img src="image3.png" alt="image3.png"></li>
+ <li class="separator"></li>
+ <li><img src="image4.png" alt="image4.png"></li>
+ </ul>
+ </body>
+</html>
+Save the file to the /data/image/ directory and upload four images named image1.png,
+image2.png, image3.png, and image4.png to this directory. After the upload is complete,
+the files in the /data/image/ directory are shown as follows.
+ama akay la directory image
+ls 
+
+⚫ Question: Why is only one Apache host required to perform the preceding
+operations?
+Answer: The same GlusterFS logical volumes are mounted to two Apache hosts.
+Therefore, the data is consistent. Once you perform the operations on one Apache host,
+you can view the same data on the other Apache host.
+
+
+
+Step 5 Create WordPress.
+Create WordPress on one Apache host by referring to the previous content.
+Step 6 Conduct a testing.
+After all the preceding configurations are complete, use the EIP and port of the Apache
+host to check whether the corresponding page can be accessed. Ensure that the page is
+correct before performing subsequent operations.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
