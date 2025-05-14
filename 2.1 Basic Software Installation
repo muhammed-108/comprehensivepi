@@ -1,0 +1,137 @@
+2.1 Basic Software Installation
+Step 1 Install and configure Apache and PHP components.
+Compile playbook to install Apache and PHP components on Apache1 and Apache2. The
+following information is for reference:
+---
+- hosts: Apache
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install httpd
+ yum:
+ name: httpd
+ state: present
+ - name: enable and start httpd
+ service:
+ name: httpd
+ state: started
+ enabled: yes
+ - name: install php
+ yum:
+ name: php
+ state: present
+ - name: install php-mysqlnd
+ yum:
+ name: php-mysqlnd
+ state: present 
+
+
+
+Step 2 Install a MySQL database.
+Compile playbook to install MySQL-related components on MySQL1 and MySQL2. The
+following information is for reference:
+---
+- hosts: Mysql
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install mysql
+ yum:
+ name: mysql-server
+ state: present
+ - name: enable and start mysql
+ service:
+ name: mysqld
+ state: started
+ enabled: yes
+
+Step 3 Install Keepalived.
+Compile playbook to install Keepalived components on Nginx1, Nginx2, Gluster1,
+Gluster2, and Gluster3. The following information is for reference:
+---
+- hosts: Nginx:Gluster
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install keepalived
+ yum:
+ name: keepalived
+ state: present
+⚫ Question: In the preceding tasks, why does not start Keepalived after it is installed?
+Answer: After Keepalived is installed, the configuration files of Keepalived on all hosts are
+the same. If Keepalived is started at this time, the startup fails. Therefore, you are advised
+to start Keepalived after it is configured.
+Step 4 Install Nginx.
+Compile playbook to install Nginx components on Nginx1, Nginx2, and Zabbix. The
+following information is for reference:
+---
+- hosts: Nginx:zabbix
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install nginx
+ yum:
+ name: nginx
+ state: present
+ - name: enable and start nginx
+ service:
+ name: nginx
+ state: started
+ enabled: yes
+- hosts: zabbix
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install php
+ yum:
+ name: php
+ state: present
+ - name: config port of php
+ lineinfile:
+ path: /etc/php-fpm.d/www.conf
+ insertafter: "listen.allowed_clients = 127.0.0.1"
+ line: "listen = 9000"
+ - name: enable and start php
+ service:
+ name: php-fpm
+ state: started
+ enabled: yes
+Step 5 Install GlusterFS.
+Compile playbook to install GlusterFS components on Gluster-01, Gluster-02, and
+Gluster-03. The following information is for reference:
+---
+- hosts: Gluster
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install glusterfs-server
+ yum:
+ name: glusterfs-server
+ state: present
+ - name: enable and star glusterfs-server
+ service:
+ name: glusterd
+ state: started
+ enabled: yes
+Step 6 Install the DNS service.
+Compile playbook to install bind-related components on the DNS. The following
+information is for reference:
+---
+- hosts: dns
+ remote_user: root
+ gather_facts: no
+ tasks:
+ - name: install dns
+ yum:
+ name: bind
+state: present
+ - name: enable and start named
+ service:
+ name: named
+ state: started
+ enabled: yes
+
+
+
+
+
